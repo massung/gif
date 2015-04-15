@@ -1,4 +1,4 @@
-;;;; GIF renderer for LispWorks
+;;;; GIF decoder for LispWorks
 ;;;;
 ;;;; Copyright (c) 2015 by Jeffrey Massung
 ;;;;
@@ -303,22 +303,27 @@
 
 (defun read-lzw-blocks (stream)
   "Read a set of compressed, image data blocks."
-  (with-output-bit-stream (bytes)
-    (loop for block-size = (read-byte stream)
-          until (zerop block-size)
-          do (dotimes (i block-size)
-               (write-byte (read-byte stream) bytes)))))
+  (loop with bytes = (make-array 128 :adjustable t :fill-pointer 0)
+        
+        ;; loop over all the blocks
+        for block-size = (read-byte stream)
+        
+        ;; stop when there's a zero-length block
+        do (if (zerop block-size)
+               (return (make-input-bit-stream bytes))
+             (dotimes (i block-size)
+               (vector-push-extend (read-byte stream) bytes)))))
 
 (defun read-image-data (color-table stream)
   "Read the bytes (and decode) a GIF image."
   (loop with image = (make-array 0 :adjustable t :fill-pointer t)
         with min-code-size = (1+ (read-byte stream))
-        with code-stream = (make-input-bit-stream (read-lzw-blocks stream))
         with code-size = min-code-size
+        with code-stream = (read-lzw-blocks stream)
         with clear-code = (stream-read-bits code-stream code-size)
         with stop-code = (1+ clear-code)
         with code-1 = nil
-
+        
         ;; create an initial code table
         with code-table = (loop with size = (+ (length color-table) 2)
                                 with codes = (make-array size :adjustable t :fill-pointer t)
@@ -457,8 +462,8 @@
 
 (defun load-gif (pathname)
   "Load a GIF structure from a file on disk."
-  (let ((bit-stream (make-input-bit-stream pathname)))
-    (read-gif bit-stream)))
+  (with-input-bit-stream (stream pathname)
+    (read-gif stream)))
 
 (defun make-gif-image-frames (port gif)
   "Create a series of images from a GIF structure."
