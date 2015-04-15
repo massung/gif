@@ -1,6 +1,6 @@
 ;;;; GIF renderer for LispWorks
 ;;;;
-;;;; Copyright (c) 2012 by Jeffrey Massung
+;;;; Copyright (c) 2015 by Jeffrey Massung
 ;;;;
 ;;;; This file is provided to you under the Apache License,
 ;;;; Version 2.0 (the "License"); you may not use this file
@@ -18,7 +18,7 @@
 ;;;;
 
 (defpackage :gif
-  (:use :cl :lw :capi)
+  (:use :cl :lw :capi :bit-stream)
   (:export
    #:read-gif
    #:load-gif
@@ -303,88 +303,64 @@
 
 (defun read-lzw-blocks (stream)
   "Read a set of compressed, image data blocks."
-  (loop with bits = 0
-        with pos = 0
-        
-        ;; loop over all the blocks
-        for block-size = (read-byte stream)
-        
-        ;; stop when there's a zero-length block
-        do (if (zerop block-size)
-               (return bits)
-             (dotimes (i block-size)
-               (setf bits (dpb (read-byte stream) (byte 8 pos) bits))
-               
-               ;; advance to the next byte position
-               (incf pos 8)))))
+  (with-output-bit-stream (bytes)
+    (loop for block-size = (read-byte stream)
+          until (zerop block-size)
+          do (dotimes (i block-size)
+               (write-byte (read-byte stream) bytes)))))
 
 (defun read-image-data (color-table stream)
   "Read the bytes (and decode) a GIF image."
-  (let* ((image (make-array 0 :adjustable t :fill-pointer t))
-         
-         ;; get the minimum code size for each color
-         (min-code-size (1+ (read-byte stream)))
-         
-         ;; read the entire data bits into a bignum for extracting codes
-         (n (read-lzw-blocks stream))
-         
-         ;; current code size and bit position when reading from the lzw blocks
-         (code-size min-code-size)
-         (bit-pos 0))
+  (loop with image = (make-array 0 :adjustable t :fill-pointer t)
+        with min-code-size = (1+ (read-byte stream))
+        with code-stream = (make-input-bit-stream (read-lzw-blocks stream))
+        with code-size = min-code-size
+        with clear-code = (stream-read-bits code-stream code-size)
+        with stop-code = (1+ clear-code)
+        with code-1 = nil
 
-    ;; read the next code from the stream
-    (flet ((read-code ()
-             (prog1
-                 (ldb (byte code-size bit-pos) n)
-               (incf bit-pos code-size))))
-
-      ;; read the LZW image data
-      (loop with clear-code = (read-code)
-            with stop-code = (1+ clear-code)
-            with code-1 = nil
-
-            ;; create an initial code table
-            with code-table = (loop with size = (+ (length color-table) 2)
-                                    with codes = (make-array size :adjustable t :fill-pointer t)
-                                    for i below (length color-table)
-                                    do (setf (aref codes i) (list i))
-                                    finally (return codes))
-            
-            ;; read codes
-            for code = (read-code)
-
-            ;; stop at the terminal
-            do (cond ((= code stop-code)
-                      (return image))
-
-                     ;; reset at a clear code
-                     ((= code clear-code)
-                      (setf code-1 nil
-                            code-size min-code-size)
-
-                      ;; reset the code table back to the reset position
-                      (setf (fill-pointer code-table) (+ (length color-table) 2)))
-                     
-                     ;; the code is already in the code table
-                     ((< code (length code-table))
-                      (let ((seq (aref code-table code)))
-                        (dolist (i seq)
-                          (vector-push-extend i image))
-                        (when code-1
-                          (vector-push-extend (append code-1 (list (first seq))) code-table))))
-                       
-                     ;; the code is new and needs to be added to the table
-                     (t (let ((seq (append code-1 (list (first code-1)))))
-                          (dolist (i seq)
-                            (vector-push-extend i image))
-                          (vector-push-extend seq code-table))))
+        ;; create an initial code table
+        with code-table = (loop with size = (+ (length color-table) 2)
+                                with codes = (make-array size :adjustable t :fill-pointer t)
+                                for i below (length color-table)
+                                do (setf (aref codes i) (list i))
+                                finally (return codes))
+        
+        ;; read codes
+        for code = (stream-read-bits code-stream code-size)
+        
+        ;; stop at the terminal
+        do (cond ((= code stop-code)
+                  (return image))
                  
-            ;; do we need to increase the code-size?
-            when (and (< code-size 12) (= (length code-table) (ash 1 code-size)))
-            do (incf code-size)
-            
-            ;; update the previous code to this code
-            do (setf code-1 (aref code-table code))))))
+                 ;; reset at a clear code
+                 ((= code clear-code)
+                  (setf code-1 nil
+                        code-size min-code-size)
+                  
+                  ;; reset the code table back to the reset position
+                  (setf (fill-pointer code-table) (+ (length color-table) 2)))
+                 
+                 ;; the code is already in the code table
+                 ((< code (length code-table))
+                  (let ((seq (aref code-table code)))
+                    (dolist (i seq)
+                      (vector-push-extend i image))
+                    (when code-1
+                      (vector-push-extend (append code-1 (list (first seq))) code-table))))
+                 
+                 ;; the code is new and needs to be added to the table
+                 (t (let ((seq (append code-1 (list (first code-1)))))
+                      (dolist (i seq)
+                        (vector-push-extend i image))
+                      (vector-push-extend seq code-table))))
+        
+        ;; do we need to increase the code-size?
+        when (and (< code-size 12) (= (length code-table) (ash 1 code-size)))
+        do (incf code-size)
+        
+        ;; update the previous code to this code
+        do (setf code-1 (aref code-table code))))
 
 (defun read-image-descriptor (stream &key gct ext)
   "Read an image descriptor."
@@ -481,8 +457,8 @@
 
 (defun load-gif (pathname)
   "Load a GIF structure from a file on disk."
-  (with-open-file (stream pathname :element-type '(unsigned-byte 8))
-    (read-gif stream)))
+  (let ((bit-stream (make-input-bit-stream pathname)))
+    (read-gif bit-stream)))
 
 (defun make-gif-image-frames (port gif)
   "Create a series of images from a GIF structure."
@@ -552,23 +528,3 @@
             ;; update the image
             collect (prog1 new-image
                       (setf image new-image))))))
-
-#|
-(defun animate-gif (port gif)
-  "Spawns a process that will animate a GIF on a graphics port."
-  (flet ((animate (images exts)
-           (do ((i 0 (1+ i)))
-               ((eql i repeat-count))
-             (loop for image in images
-                   for ext in exts
-
-                   ;; render the next frame's image
-                   do (progn
-                        (apply-in-pane-process-if-alive port #'gp:draw-image port image x y)
-
-                        ;; sleep for how long this image should be displayed
-                        (mp:current-process-pause (graphic-control-extension-delay-time ext)))))))
-
-    ;; start the animation process
-    (mp:process-run-function "GIF animation" () #'animate images exts)))
-|#

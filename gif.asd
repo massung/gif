@@ -11,4 +11,4 @@
   :description "GIF decoder for LispWorks."
   :serial t
   :components ((:file "gif"))
-  :depends-on ())
+  :depends-on ("bit-stream"))
