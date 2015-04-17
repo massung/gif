@@ -10,5 +10,6 @@
   :license "Apache 2.0"
   :description "GIF decoder for LispWorks."
   :serial t
-  :components ((:file "gif"))
+  :components ((:file "gif")
+               (:file "animation"))
   :depends-on ("bit-stream"))
