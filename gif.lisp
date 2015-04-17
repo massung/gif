@@ -23,9 +23,58 @@
    #:read-gif
    #:load-gif
 
-   ;; given a graphics port and a GIF, create a list of images
-   #:make-gif-image-frames
-   ))
+   ;; images and animation
+   #:make-gif-image
+   #:make-gif-animation
+
+   ;; gif objects
+   #:gif-version
+   #:gif-logical-screen-descriptor
+   #:gif-extensions
+   #:gif-image-data-blocks
+
+   ;; gif screen descriptor
+   #:logical-screen-descriptor-width
+   #:logical-screen-descriptor-height
+   #:logical-screen-descriptor-resolution
+   #:logical-screen-descriptor-background-color
+   #:logical-screen-descriptor-aspect-ratio
+   #:logical-screen-descriptor-color-table
+   #:logical-screen-descriptor-color-table-sorted-p
+
+   ;; gif application extension
+   #:application-extension-id
+   #:application-extension-auth-code
+   #:application-extension-data
+
+   ;; gif comment extension
+   #:comment-extension-text
+
+   ;; gif graphic control extension
+   #:graphic-control-extension-disposal-method
+   #:graphic-control-extension-delay-time
+   #:graphic-control-extension-user-p
+   #:graphic-control-extension-transparent-p
+   #:graphic-control-extension-transparent-color
+
+   ;; gif plain text extension
+   #:plain-text-extension-text-grid-left-pos
+   #:plain-text-extension-text-grid-top-pos
+   #:plain-text-extension-text-grid-width
+   #:plain-text-extension-text-grid-height
+   #:plain-text-extension-cell-width
+   #:plain-text-extension-cell-height
+   #:plain-text-extension-foreground-color
+   #:plain-text-extension-background-color
+   #:plain-text-extension-text
+
+   ;; gif animations
+   #:gif-animation-gif
+   #:gif-animation-frames
+   
+   ;; gif animation frames
+   #:gif-animation-frame-image
+   #:gif-animation-frame-delay))
 
 (in-package :gif)
 
@@ -33,7 +82,7 @@
   ((version    :initarg :version            :reader gif-version)
    (screen     :initarg :screen             :reader gif-logical-screen-descriptor)
    (extensions :initarg :extensions         :reader gif-extensions)
-   (images     :initarg :images             :reader gif-images))
+   (images     :initarg :images             :reader gif-image-data-blocks))
   (:documentation "Representation of a GIF in memory."))
 
 (defclass logical-screen-descriptor ()
@@ -89,7 +138,7 @@
   (:documentation "A single frame. Might be a portion of - or the entire - screen."))
 
 (defun test ()
-  (load-gif #p"c:/users/jeff.massung/desktop/interlaced.gif"))
+  (load-gif #p"~/.lispworks.d/gif/interlaced.gif"))
 
 (defun read-short (stream)
   "Returns an unsigned, 16-bit fixnum in big-endian format from the stream."
@@ -465,41 +514,42 @@
   (with-input-bit-stream (stream pathname)
     (read-gif stream)))
 
-(defun make-gif-image-frames (port gif)
-  "Create a series of images from a GIF structure."
-  (let ((w (logical-screen-descriptor-width (gif-logical-screen-descriptor gif)))
-        (h (logical-screen-descriptor-height (gif-logical-screen-descriptor gif))))
+(defun make-gif-image (port gif &optional data-block overlay merge-p)
+  "Create a new graphics port image from a GIF data block, optionally overlayed on another image."
+  (let* ((w (logical-screen-descriptor-width (gif-logical-screen-descriptor gif)))
+         (h (logical-screen-descriptor-height (gif-logical-screen-descriptor gif)))
 
-    ;; create a single image 
-    (flet ((build-image (prev-image gif-image)
-             (let* ((image (if prev-image
-                               (gp:make-sub-image port prev-image)
-                             (gp:make-image port w h :alpha t)))
-                    
-                    ;; coordinates of the gif image
-                    (left (image-data-block-left gif-image))
-                    (top (image-data-block-top gif-image))
-                    (width (image-data-block-width gif-image))
-                    (height (image-data-block-height gif-image))
+         ;; merge onto the overlay, start from the overlay, or create a new image
+         (image (if overlay
+                    (if merge-p
+                        overlay
+                      (gp:make-sub-image port overlay))
+                  (gp:make-image port w h :alpha t))))
 
-                    ;; is this image interlaced?
-                    (interlaced-p (image-data-block-interlaced-p gif-image))
-
-                    ;; get the transparency index (if there is one)
-                    (transparency-index (when-let (ext (image-data-block-extension gif-image))
-                                          (when (graphic-control-extension-transparent-p ext)
-                                            (graphic-control-extension-transparent-color ext))))
-
-                    ;; get the color table to use
-                    (color-table (let ((table (image-data-block-color-table gif-image)))
-                                   (map 'vector #'(lambda (c) (color:convert-color port c)) table)))
-
-                    ;; the data image block of color indices
-                    (index-stream (image-data-block-index-stream gif-image))
-
-                    ;; create an image access object
-                    (access (gp:make-image-access port image)))
-
+    (flet ((render-data-block (data-block)
+             (let ((left (image-data-block-left data-block))
+                   (top (image-data-block-top data-block))
+                   (width (image-data-block-width data-block))
+                   (height (image-data-block-height data-block))
+         
+                   ;; is this data block interlaced?
+                   (interlaced-p (image-data-block-interlaced-p data-block))
+         
+                   ;; get the transparency index (if there is one)
+                   (transparency-index (when-let (ext (image-data-block-extension data-block))
+                                         (when (graphic-control-extension-transparent-p ext)
+                                           (graphic-control-extension-transparent-color ext))))
+         
+                   ;; get the color table to use
+                   (color-table (let ((table (image-data-block-color-table data-block)))
+                                  (map 'vector #'(lambda (c) (color:convert-color port c)) table)))
+         
+                   ;; the data image block of color indices
+                   (index-stream (image-data-block-index-stream data-block))
+         
+                   ;; create an image access object
+                   (access (gp:make-image-access port image)))
+    
                ;; write the image data
                (unwind-protect
                    (flet ((render-line (from-y to-y)
@@ -508,7 +558,7 @@
                                              (unless (eql i transparency-index)
                                                (aref color-table i))))
                                 (setf (gp:image-access-pixel access (+ x left) (+ to-y top)) c)))))
-
+                     
                      ;; if the image is interlaced then the scanlines are out of order
                      (if interlaced-p
                          (loop with from-y = 0
@@ -518,18 +568,13 @@
                                              (render-line from-y to-y)
                                              (incf from-y)))
                                finally (return image))
-                       (loop for from-y below height
-                             do (render-line from-y from-y)
-                             finally (return image))))
+                       (loop for from-y below height do (render-line from-y from-y))))
                  (gp:free-image-access access)))))
-      
-      ;; generate a list of all the images
-      (loop with image = nil
 
-            ;; coalesce all the images together
-            for i across (gif-images gif)
-            for new-image = (build-image image i)
+      ;; TODO: if there's no overlay, write the background color first
 
-            ;; update the image
-            collect (prog1 new-image
-                      (setf image new-image))))))
+      ;; if there's no data-block selected, render them all, return the image
+      (prog1 image
+        (if (null data-block)
+            (loop for i across (gif-image-data-blocks gif) do (render-data-block i))
+          (render-data-block data-block))))))
