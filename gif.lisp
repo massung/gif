@@ -138,7 +138,7 @@
   (:documentation "A single frame. Might be a portion of - or the entire - screen."))
 
 (defun test ()
-  (load-gif #p"~/.lispworks.d/gif/interlaced.gif"))
+  (load-gif #p"~/.lispworks.d/gif/test/interlaced.gif"))
 
 (defun read-short (stream)
   "Returns an unsigned, 16-bit fixnum in big-endian format from the stream."
